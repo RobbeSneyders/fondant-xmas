@@ -315,6 +315,7 @@ class Pipeline:
             description: Optional description of the pipeline.
         """
         self.base_path = base_path
+        self.run_id = None
         self.name = self._validate_pipeline_name(name)
         self.description = description
         self.package_path = f"{name}.tgz"
@@ -438,8 +439,10 @@ class Pipeline:
 
     def get_run_id(self) -> str:
         """Get a unique run ID for the pipeline."""
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        return f"{self.name}-{timestamp}"
+        if not self.run_id:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            self.run_id = f"{self.name}-{timestamp}"
+        return self.run_id
 
     def validate(self, run_id: str):
         """Sort and run validation on the pipeline definition.
@@ -719,6 +722,9 @@ class Dataset:
             requirements: A list of requirements to install before executing the component.
         """
         import yaml
+        import sys
+
+        from fondant.core.manifest import Metadata
         from fondant.component.executor import DaskLoadExecutor, DaskTransformExecutor, DaskWriteExecutor, PandasTransformExecutor
 
         # create a component spec 
@@ -727,12 +733,45 @@ class Dataset:
             "name": "example_component",
             "description": "This is an example component",
             "image": "example_component:latest",
-            "tags": ["some tag"], 
+            "produces": {
+                  "additionalProperties": True,
+            },
+            "consumes": {
+                  "additionalProperties": True,
+            },
         }
         with open("spec.yaml", "w") as f:
             yaml.dump(spec_dict, f)
         
         component_spec = ComponentSpec.from_file("spec.yaml")
+
+        # create metadata
+
+        path = self.pipeline.base_path
+        run_id = self.pipeline.get_run_id()
+
+        metadata = Metadata(
+            pipeline_name=self.pipeline.name,
+            run_id=run_id,
+            base_path=path,
+            component_id="foobar",
+            cache_key=self.operation.get_component_cache_key(),
+        )
+
+        sys.argv = [
+            "",
+            "--input_manifest_path",
+            f"{path}/{metadata.pipeline_name}/{metadata.run_id}/"
+            f"{self.operation.name}/manifest.json",
+            "--metadata",
+            metadata.to_json(),
+            "--component_spec",
+            json.dumps(component_spec.specification),
+            "--cache",
+            str(cache),
+            "--output_manifest_path",
+            f"{path}/{metadata.pipeline_name}/{metadata.run_id}/{'foobar'}/manifest.json",
+        ]
 
         # install extra requirements
         ## TODO
