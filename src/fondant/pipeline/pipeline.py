@@ -21,6 +21,8 @@ from fondant.core.exceptions import InvalidPipelineDefinition
 from fondant.core.manifest import Manifest
 from fondant.core.schema import Type
 
+from fondant.component import BaseComponent
+
 logger = logging.getLogger(__name__)
 
 VALID_ACCELERATOR_TYPES = [
@@ -694,3 +696,62 @@ class Dataset:
             client_kwargs=client_kwargs,
         )
         self.pipeline._apply(operation, self)
+
+    def execute(
+            self,
+            component:  BaseComponent,
+            *,
+            requirements: t.List[str] = [],
+            consumes: t.Optional[t.Dict[str, t.Union[str, pa.DataType]]] = None,
+            produces: t.Optional[t.Dict[str, t.Union[str, pa.DataType]]] = None,
+            arguments: t.Optional[t.Dict[str, t.Any]] = None,
+            input_partition_rows: t.Optional[t.Union[int, str]] = None,
+            resources: t.Optional[Resources] = None,
+            cache: t.Optional[bool] = True,
+            cluster_type: t.Optional[str] = "default",
+            client_kwargs: t.Optional[dict] = None,
+    ) -> None:
+        """
+        Execute the component on the dataset.
+
+        Args:
+            component: The component to execute.
+            requirements: A list of requirements to install before executing the component.
+        """
+        import yaml
+        from fondant.component.executor import DaskLoadExecutor, DaskTransformExecutor, DaskWriteExecutor, PandasTransformExecutor
+
+        # create a component spec 
+
+        spec_dict = {
+            "name": "example_component",
+            "description": "This is an example component",
+            "image": "example_component:latest",
+            "tags": ["some tag"], 
+        }
+        with open("spec.yaml", "w") as f:
+            yaml.dump(spec_dict, f)
+        
+        component_spec = ComponentSpec.from_file("spec.yaml")
+
+        # install extra requirements
+        ## TODO
+
+        executor_mapping =  {
+            "DaskLoadComponent": DaskLoadExecutor,
+            "DaskTransformComponent": DaskTransformExecutor,
+            "DaskWriteComponent": DaskWriteExecutor,
+            "PandasTransformComponent": PandasTransformExecutor,
+        }
+
+        executor = executor_mapping[component.__bases__[0].__name__].from_spec(
+            component_spec,
+            cache=cache,
+            input_partition_rows=input_partition_rows,
+            cluster_type=cluster_type,
+            client_kwargs=client_kwargs,
+            consumes=consumes,
+            produces=produces,
+            )
+        executor.execute(component)
+
