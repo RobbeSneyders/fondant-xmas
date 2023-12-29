@@ -726,11 +726,16 @@ class Dataset:
 
         from fondant.core.manifest import Metadata
         from fondant.component.executor import DaskLoadExecutor, DaskTransformExecutor, DaskWriteExecutor, PandasTransformExecutor
+        from fondant.component.executor import ExecutorFactory
 
-        # create a component spec 
 
+        # get component name based on the class name
+
+        component_name = component().__class__.__name__
+
+        # create a barebones component spec
         spec_dict = {
-            "name": "example_component",
+            "name": component_name,
             "description": "This is an example component",
             "image": "example_component:latest",
             "produces": {
@@ -740,13 +745,30 @@ class Dataset:
                   "additionalProperties": True,
             },
         }
-        with open("spec.yaml", "w") as f:
+
+
+        # ideally we dont need to write this to a file to use but...
+        with open("temp/fondant_component.yaml", "w") as f:
             yaml.dump(spec_dict, f)
         
-        component_spec = ComponentSpec.from_file("spec.yaml")
+        component_spec = ComponentSpec.from_file("temp/fondant_component.yaml")
+
+
+        operation = ComponentOp(
+            "temp", # point to the component spec we just created above @TODO make a real temp dir ?
+            consumes=consumes,
+            produces=produces,
+            arguments=arguments,
+            input_partition_rows=input_partition_rows,
+            resources=resources,
+            cache=cache,
+            cluster_type=cluster_type,
+            client_kwargs=client_kwargs,
+        )
+        # dataset to be returned to allow further chaining
+        dataset = self.pipeline._apply(operation, self)
 
         # create metadata
-
         path = self.pipeline.base_path
         run_id = self.pipeline.get_run_id()
 
@@ -754,10 +776,11 @@ class Dataset:
             pipeline_name=self.pipeline.name,
             run_id=run_id,
             base_path=path,
-            component_id="foobar",
+            component_id=component_name,
             cache_key=self.operation.get_component_cache_key(),
         )
 
+        # this is also hacky but seems like the only way to pass args to the executor
         sys.argv = [
             "",
             "--input_manifest_path",
@@ -770,27 +793,21 @@ class Dataset:
             "--cache",
             str(cache),
             "--output_manifest_path",
-            f"{path}/{metadata.pipeline_name}/{metadata.run_id}/{'foobar'}/manifest.json",
+            f"{path}/{metadata.pipeline_name}/{metadata.run_id}/{component_name}/manifest.json",
         ]
+
+        # if consumes is not None:
+        #     sys.argv.extend(["--consumes", json.dumps(consumes)])
+        # if produces is not None:
+        #     sys.argv.extend(["--produces", json.dumps(produces)])
 
         # install extra requirements
         ## TODO
 
-        executor_mapping =  {
-            "DaskLoadComponent": DaskLoadExecutor,
-            "DaskTransformComponent": DaskTransformExecutor,
-            "DaskWriteComponent": DaskWriteExecutor,
-            "PandasTransformComponent": PandasTransformExecutor,
-        }
 
-        executor = executor_mapping[component.__bases__[0].__name__].from_spec(
-            component_spec,
-            cache=cache,
-            input_partition_rows=input_partition_rows,
-            cluster_type=cluster_type,
-            client_kwargs=client_kwargs,
-            consumes=consumes,
-            produces=produces,
-            )
+        executor_factory = ExecutorFactory(component)
+        executor = executor_factory.get_executor()
         executor.execute(component)
+
+        return dataset
 
