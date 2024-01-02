@@ -22,6 +22,8 @@ from fondant.core.exceptions import InvalidPipelineDefinition
 from fondant.core.manifest import Manifest
 from fondant.core.schema import Field, Type
 
+from fondant.component import BaseComponent
+
 logger = logging.getLogger(__name__)
 
 VALID_ACCELERATOR_TYPES = [
@@ -314,6 +316,7 @@ class Pipeline:
             description: Optional description of the pipeline.
         """
         self.base_path = base_path
+        self.run_id = None
         self.name = self._validate_pipeline_name(name)
         self.description = description
         self.package_path = f"{name}.tgz"
@@ -437,8 +440,10 @@ class Pipeline:
 
     def get_run_id(self) -> str:
         """Get a unique run ID for the pipeline."""
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        return f"{self.name}-{timestamp}"
+        if not self.run_id:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            self.run_id = f"{self.name}-{timestamp}"
+        return self.run_id
 
     def validate(self, run_id: str):
         """Sort and run validation on the pipeline definition.
@@ -705,3 +710,115 @@ class Dataset:
             client_kwargs=client_kwargs,
         )
         self.pipeline._apply(operation, self)
+
+    def execute(
+            self,
+            component:  BaseComponent,
+            *,
+            requirements: t.List[str] = [],
+            consumes: t.Optional[t.Dict[str, t.Union[str, pa.DataType]]] = None,
+            produces: t.Optional[t.Dict[str, t.Union[str, pa.DataType]]] = None,
+            arguments: t.Optional[t.Dict[str, t.Any]] = None,
+            input_partition_rows: t.Optional[t.Union[int, str]] = None,
+            resources: t.Optional[Resources] = None,
+            cache: t.Optional[bool] = True,
+            cluster_type: t.Optional[str] = "default",
+            client_kwargs: t.Optional[dict] = None,
+    ) -> None:
+        """
+        Execute the component on the dataset.
+
+        Args:
+            component: The component to execute.
+            requirements: A list of requirements to install before executing the component.
+        """
+        import yaml
+        import sys
+
+        from fondant.core.manifest import Metadata
+        from fondant.component.executor import DaskLoadExecutor, DaskTransformExecutor, DaskWriteExecutor, PandasTransformExecutor
+        from fondant.component.executor import ExecutorFactory
+
+
+        # get component name based on the class name
+
+        component_name = component().__class__.__name__
+
+        # create a barebones component spec
+        spec_dict = {
+            "name": component_name,
+            "description": "This is an example component",
+            "image": "example_component:latest",
+            "produces": {
+                  "additionalProperties": True,
+            },
+            "consumes": {
+                  "additionalProperties": True,
+            },
+        }
+
+
+        # ideally we dont need to write this to a file to use but...
+        with open("temp/fondant_component.yaml", "w") as f:
+            yaml.dump(spec_dict, f)
+        
+        component_spec = ComponentSpec.from_file("temp/fondant_component.yaml")
+
+
+        operation = ComponentOp(
+            "temp", # point to the component spec we just created above @TODO make a real temp dir ?
+            consumes=consumes,
+            produces=produces,
+            arguments=arguments,
+            input_partition_rows=input_partition_rows,
+            resources=resources,
+            cache=cache,
+            cluster_type=cluster_type,
+            client_kwargs=client_kwargs,
+        )
+        # dataset to be returned to allow further chaining
+        dataset = self.pipeline._apply(operation, self)
+
+        # create metadata
+        path = self.pipeline.base_path
+        run_id = self.pipeline.get_run_id()
+
+        metadata = Metadata(
+            pipeline_name=self.pipeline.name,
+            run_id=run_id,
+            base_path=path,
+            component_id=component_name,
+            cache_key=self.operation.get_component_cache_key(),
+        )
+
+        # this is also hacky but seems like the only way to pass args to the executor
+        sys.argv = [
+            "",
+            "--input_manifest_path",
+            f"{path}/{metadata.pipeline_name}/{metadata.run_id}/"
+            f"{self.operation.name}/manifest.json",
+            "--metadata",
+            metadata.to_json(),
+            "--component_spec",
+            json.dumps(component_spec.specification),
+            "--cache",
+            str(cache),
+            "--output_manifest_path",
+            f"{path}/{metadata.pipeline_name}/{metadata.run_id}/{component_name}/manifest.json",
+        ]
+
+        # if consumes is not None:
+        #     sys.argv.extend(["--consumes", json.dumps(consumes)])
+        # if produces is not None:
+        #     sys.argv.extend(["--produces", json.dumps(produces)])
+
+        # install extra requirements
+        ## TODO
+
+
+        executor_factory = ExecutorFactory(component)
+        executor = executor_factory.get_executor()
+        executor.execute(component)
+
+        return dataset
+
